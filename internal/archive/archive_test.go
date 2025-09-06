@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"pm/config"
 	"runtime"
 	"strings"
 	"testing"
@@ -34,37 +35,98 @@ func format(msg string, args ...interface{}) string {
 	if len(args) == 0 {
 		return msg
 	}
-	return strings.TrimSpace(strings.ReplaceAll(fmt.Sprintf(msg, args...), "\n", " "))
+	return strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf(msg, args...), "\n", " "), "\t", " "))
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	counts := make(map[string]int)
+	for _, item := range a {
+		counts[item]++
+	}
+	for _, item := range b {
+		counts[item]--
+		if counts[item] < 0 {
+			return false
+		}
+	}
+	for _, c := range counts {
+		if c != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func logContains(logs []string, substr string) bool {
+	for _, log := range logs {
+		if strings.Contains(log, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+func createFile(t *testing.T, dir, name, content string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func createZip(t *testing.T, path string) {
+	t.Helper()
+	out, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Close()
+
+	zipWriter := zip.NewWriter(out)
+	defer zipWriter.Close()
+
+	addFile := func(name, content string) {
+		header := &zip.FileHeader{
+			Name:   name,
+			Method: zip.Deflate,
+		}
+		writer, err := zipWriter.CreateHeader(header)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = writer.Write([]byte(content))
+	}
+
+	addFile("readme.txt", "Hello")
+	addFile("src/main.go", "package main")
+	addFile("docs/", "")
 }
 
 func TestCollectFiles(t *testing.T) {
 	tempDir := t.TempDir()
 
-	createFile := func(name string) {
-		path := filepath.Join(tempDir, name)
-		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte("test"), 0644); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	createFile("file1.txt")
-	createFile("file2.go")
-	createFile("subdir/file3.txt")
-	createFile("exclude_me.tmp")
+	createFile(t, tempDir, "file1.txt", "test")
+	createFile(t, tempDir, "file2.go", "test")
+	createFile(t, tempDir, "subdir/file3.txt", "test")
+	createFile(t, tempDir, "exclude_me.tmp", "test")
 
 	tests := []struct {
 		name        string
-		targets     []Target
+		targets     []config.Target
 		wantFiles   []string
 		expectError bool
 		logContains []string
 	}{
 		{
 			name: "один шаблон, найдены файлы",
-			targets: []Target{
+			targets: []config.Target{
 				{Path: filepath.Join(tempDir, "*.txt")},
 			},
 			wantFiles: []string{
@@ -75,7 +137,7 @@ func TestCollectFiles(t *testing.T) {
 		},
 		{
 			name: "несколько шаблонов",
-			targets: []Target{
+			targets: []config.Target{
 				{Path: filepath.Join(tempDir, "*.txt")},
 				{Path: filepath.Join(tempDir, "*.go")},
 				{Path: filepath.Join(tempDir, "subdir", "*.txt")},
@@ -89,7 +151,7 @@ func TestCollectFiles(t *testing.T) {
 		},
 		{
 			name: "шаблон не дал результатов",
-			targets: []Target{
+			targets: []config.Target{
 				{Path: filepath.Join(tempDir, "*.pdf")},
 			},
 			wantFiles:   nil,
@@ -98,7 +160,7 @@ func TestCollectFiles(t *testing.T) {
 		},
 		{
 			name: "исключение файла",
-			targets: []Target{
+			targets: []config.Target{
 				{
 					Path:    filepath.Join(tempDir, "*.*"),
 					Exclude: "*.tmp",
@@ -113,7 +175,7 @@ func TestCollectFiles(t *testing.T) {
 		},
 		{
 			name: "ошибка в шаблоне исключения",
-			targets: []Target{
+			targets: []config.Target{
 				{
 					Path:    filepath.Join(tempDir, "*.txt"),
 					Exclude: "foo[bar",
@@ -125,7 +187,7 @@ func TestCollectFiles(t *testing.T) {
 		},
 		{
 			name: "пропуск директорий",
-			targets: []Target{
+			targets: []config.Target{
 				{Path: filepath.Join(tempDir, "*")},
 			},
 			wantFiles: []string{
@@ -171,19 +233,8 @@ func TestCreateZip(t *testing.T) {
 	tempDir := t.TempDir()
 	outputPath := filepath.Join(tempDir, "test.zip")
 
-	createFile := func(name, content string) string {
-		path := filepath.Join(tempDir, name)
-		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
-			t.Fatal(err)
-		}
-		return path
-	}
-
-	file1 := createFile("data.txt", "hello")
-	file2 := createFile("src/main.go", "package main")
+	file1 := createFile(t, tempDir, "data.txt", "hello")
+	file2 := createFile(t, tempDir, "src/main.go", "package main")
 
 	tests := []struct {
 		name        string
@@ -276,34 +327,12 @@ func TestExtractZip(t *testing.T) {
 	zipPath := filepath.Join(tempDir, "test.zip")
 	destDir := filepath.Join(tempDir, "extracted")
 
-	createZip := func() {
-		out, err := os.Create(zipPath)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer out.Close()
+	createZip(t, zipPath)
 
-		zipWriter := zip.NewWriter(out)
-		defer zipWriter.Close()
-
-		addFile := func(name, content string) {
-			header := &zip.FileHeader{
-				Name:   name,
-				Method: zip.Deflate,
-			}
-			writer, err := zipWriter.CreateHeader(header)
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, _ = writer.Write([]byte(content))
-		}
-
-		addFile("readme.txt", "Hello")
-		addFile("src/main.go", "package main")
-		addFile("docs/", "")
+	corruptPath := filepath.Join(tempDir, "corrupt.zip")
+	if err := os.WriteFile(corruptPath, []byte("not a zip"), 0644); err != nil {
+		t.Fatal(err)
 	}
-
-	createZip()
 
 	tests := []struct {
 		name        string
@@ -340,16 +369,11 @@ func TestExtractZip(t *testing.T) {
 		},
 		{
 			name:        "поврежденный архив",
-			zipPath:     filepath.Join(tempDir, "corrupt.zip"),
+			zipPath:     corruptPath,
 			destDir:     destDir,
 			expectError: true,
 			logContains: []string{"Ошибка открытия архива"},
 		},
-	}
-
-	corruptPath := filepath.Join(tempDir, "corrupt.zip")
-	if err := os.WriteFile(corruptPath, []byte("not a zip"), 0644); err != nil {
-		t.Fatal(err)
 	}
 
 	for _, tt := range tests {
@@ -380,35 +404,4 @@ func TestExtractZip(t *testing.T) {
 			}
 		})
 	}
-}
-
-func equalStringSlices(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	counts := make(map[string]int)
-	for _, item := range a {
-		counts[item]++
-	}
-	for _, item := range b {
-		counts[item]--
-		if counts[item] < 0 {
-			return false
-		}
-	}
-	for _, c := range counts {
-		if c != 0 {
-			return false
-		}
-	}
-	return true
-}
-
-func logContains(logs []string, substr string) bool {
-	for _, log := range logs {
-		if strings.Contains(log, substr) {
-			return true
-		}
-	}
-	return false
 }

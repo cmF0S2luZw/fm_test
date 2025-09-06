@@ -1,65 +1,205 @@
-// cmd/main.go
 package main
 
 import (
 	"fmt"
+	"log"
 	"os"
+	"sync"
 
+	"pm/config"
+	"pm/internal/archive"
 	"pm/internal/cli"
+
+	"pm/internal/errors"
 	"pm/internal/logger"
+	"pm/internal/ssh"
 )
 
-func main() {
-	baseLogger := logger.NewBaseLogger()
+const maxConcurrentOps = 5
 
+func main() {
 	cmd, err := cli.Parse()
 	if err != nil {
-		baseLogger.Error("Ошибка парсинга команды", "error", err.Error())
-		os.Exit(1)
+		log.Fatalf("Ошибка парсинга команды: %v", err)
 	}
 
-	log := logger.NewLogger(cmd.LogLevel)
-	log.Info("Запуск пакетного менеджера",
-		"версия", "0.1.0",
-		"команда", string(cmd.Type),
-		"конфиг", cmd.ConfigPath,
-	)
+	logg := logger.NewLogger(cmd.LogLevel)
 
 	switch cmd.Type {
 	case cli.Create:
-		if err := handleCreate(log, cmd.ConfigPath); err != nil {
-			log.Error("Создание архива завершилось ошибкой", "error", err.Error())
+		if err := handleCreate(cmd.ConfigPath, logg); err != nil {
+			logg.Error("Ошибка выполнения команды create: %v", err)
 			os.Exit(1)
 		}
 	case cli.Update:
-		if err := handleUpdate(log, cmd.ConfigPath); err != nil {
-			log.Error("Обновление пакетов завершилось ошибкой", "error", err.Error())
+		if err := handleUpdate(cmd.ConfigPath, logg); err != nil {
+			logg.Error("Ошибка выполнения команды update: %v", err)
 			os.Exit(1)
 		}
+	default:
+		logg.Error("Неизвестная команда: %s", cmd.Type)
+		os.Exit(1)
 	}
 }
 
-func handleCreate(log *logger.Logger, configPath string) error {
-	fmt.Printf("📦 Создание архива из %s...\n", configPath)
+func handleCreate(configPath string, log logger.LoggerInterface) error {
+	packet, err := config.LoadPacketConfig(configPath)
+	if err != nil {
+		return err
+	}
 
-	// Здесь будет ваша логика:
-	// 1. Чтение packet.json
-	// 2. Сбор файлов через archive.CollectFiles
-	// 3. Создание ZIP через archive.CreateZip
-	// 4. Отправка по SSH
+	files, err := archive.CollectFiles(log, packet.Targets)
+	if err != nil {
+		return err
+	}
 
-	fmt.Println("✅ Архив успешно создан (заглушка)")
+	archiveName := packet.Name + "-" + packet.Ver + ".zip"
+	if err := archive.CreateZip(log, files, archiveName); err != nil {
+		return err
+	}
+	log.Info("Архив создан: %s", archiveName)
+
+	user := os.Getenv("PM_SSH_USER")
+	host := os.Getenv("PM_SSH_HOST")
+	key := os.Getenv("PM_SSH_KEY")
+	port := 22
+	if p := os.Getenv("PM_SSH_PORT"); p != "" {
+		fmt.Sscanf(p, "%d", &port)
+	}
+	remotePath := os.Getenv("PM_REMOTE_PATH")
+	if remotePath == "" {
+		remotePath = "/tmp/pm/"
+	}
+	remoteFile := remotePath + archiveName
+
+	if user == "" || host == "" || key == "" {
+		log.Info("SSH не настроен. Архив сохранён локально: %s", archiveName)
+		return nil
+	}
+
+	client, err := ssh.NewClient(user, host, key, port, log)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+
+	if err := client.Upload(archiveName, remoteFile); err != nil {
+		return err
+	}
+	log.Info("Загружено: %s -> %s:%s", archiveName, host, remoteFile)
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, maxConcurrentOps)
+	errs := make(chan error, len(packet.Packets))
+
+	for _, dep := range packet.Packets {
+		wg.Add(1)
+		go func(dep config.Packet) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			depName := dep.Name + "-" + dep.Ver + ".zip"
+			remoteDepPath := remotePath + depName
+
+			if err := client.Upload(depName, remoteDepPath); err != nil {
+				errs <- fmt.Errorf("ошибка загрузки зависимости %s: %w", depName, err)
+				return
+			}
+			log.Info("Загружена зависимость: %s", depName)
+		}(dep)
+	}
+
+	wg.Wait()
+	close(errs)
+
+	var uploadErrors []error
+	for err := range errs {
+		uploadErrors = append(uploadErrors, err)
+	}
+
+	if len(uploadErrors) > 0 {
+		log.Warn("Ошибки при загрузке зависимостей: %d", len(uploadErrors))
+		for _, e := range uploadErrors {
+			log.Error("%v", e)
+		}
+	}
+
 	return nil
 }
 
-func handleUpdate(log *logger.Logger, configPath string) error {
-	fmt.Printf("🔄 Обновление пакетов из %s...\n", configPath)
+func handleUpdate(configPath string, log logger.LoggerInterface) error {
+	pkgs, err := config.LoadPackagesConfig(configPath)
+	if err != nil {
+		return err
+	}
 
-	// Здесь будет ваша логика:
-	// 1. Чтение packages.json
-	// 2. Скачивание архивов по SSH
-	// 3. Распаковка через archive.ExtractZip
+	user := os.Getenv("PM_SSH_USER")
+	host := os.Getenv("PM_SSH_HOST")
+	key := os.Getenv("PM_SSH_KEY")
+	port := 22
+	if p := os.Getenv("PM_SSH_PORT"); p != "" {
+		fmt.Sscanf(p, "%d", &port)
+	}
+	remotePath := os.Getenv("PM_REMOTE_PATH")
+	if remotePath == "" {
+		remotePath = "/tmp/pm/"
+	}
 
-	fmt.Println("✅ Пакеты успешно обновлены (заглушка)")
-	return nil
+	if user == "" || host == "" || key == "" {
+		return errors.ErrInvalidSSHConfig
+	}
+
+	client, err := ssh.NewClient(user, host, key, port, log)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, maxConcurrentOps)
+	errs := make(chan error, len(pkgs.Packages))
+
+	for _, pkg := range pkgs.Packages {
+		wg.Add(1)
+		go func(pkg config.Packet) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			archiveName := pkg.Name
+			if pkg.Ver != "" {
+				archiveName += "-" + pkg.Ver
+			}
+			archiveName += ".zip"
+
+			remoteFile := remotePath + archiveName
+			localFile := "./" + archiveName
+
+			log.Info("Скачивание пакета: %s", archiveName)
+			if err := client.Download(remoteFile, localFile); err != nil {
+				errs <- fmt.Errorf("ошибка скачивания %s: %w", archiveName, err)
+				return
+			}
+
+			log.Info("Распаковка: %s", localFile)
+			if err := archive.ExtractZip(log, localFile, "./"); err != nil {
+				errs <- fmt.Errorf("ошибка распаковки %s: %w", archiveName, err)
+				return
+			}
+
+			log.Info("Установлен пакет: %s", pkg.Name)
+		}(pkg)
+	}
+
+	wg.Wait()
+	close(errs)
+
+	var finalErr error
+	for err := range errs {
+		log.Error("Ошибка обработки пакета: %v", err)
+		finalErr = err
+	}
+
+	return finalErr
 }

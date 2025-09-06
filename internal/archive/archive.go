@@ -6,16 +6,12 @@ import (
 	"os"
 	"path/filepath"
 
+	"pm/config"
 	"pm/internal/errors"
 	"pm/internal/logger"
 )
 
-type Target struct {
-	Path    string `json:"path"`
-	Exclude string `json:"exclude,omitempty"`
-}
-
-func CollectFiles(log logger.LoggerInterface, targets []Target) ([]string, error) {
+func CollectFiles(log logger.LoggerInterface, targets []config.Target) ([]string, error) {
 	log.Debug("Начало сборки файлов", "колличество шаблонов", len(targets))
 
 	var files []string
