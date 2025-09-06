@@ -79,7 +79,7 @@ func handleCreate(configPath string, log logger.LoggerInterface) error {
 		return nil
 	}
 
-	client, err := ssh.NewClient(user, host, key, port, log)
+	client, err := ssh.NewClient(user, host, key, port)
 	if err != nil {
 		return err
 	}
@@ -152,7 +152,7 @@ func handleUpdate(configPath string, log logger.LoggerInterface) error {
 		return errors.ErrInvalidSSHConfig
 	}
 
-	client, err := ssh.NewClient(user, host, key, port, log)
+	client, err := ssh.NewClient(user, host, key, port)
 	if err != nil {
 		return err
 	}

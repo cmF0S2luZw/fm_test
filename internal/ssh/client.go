@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 
 	"pm/internal/errors"
-	"pm/internal/logger"
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
@@ -16,10 +15,9 @@ import (
 type SSHClient struct {
 	sshClient *ssh.Client
 	sftp      *sftp.Client
-	logger    logger.LoggerInterface
 }
 
-func NewClient(user, host, keyPath string, port int, log logger.LoggerInterface) (*SSHClient, error) {
+func NewClient(user, host, keyPath string, port int) (*SSHClient, error) {
 	keyData, err := os.ReadFile(keyPath)
 	if err != nil {
 		return nil, errors.NewSSHConnectionError(host, err)
@@ -54,79 +52,106 @@ func NewClient(user, host, keyPath string, port int, log logger.LoggerInterface)
 	return &SSHClient{
 		sshClient: sshConn,
 		sftp:      sftpClient,
-		logger:    log,
 	}, nil
 }
 
 func (c *SSHClient) Upload(src, dst string) error {
+	if c == nil || c.sftp == nil {
+		return errors.NewSSHConnectionError("nil", fmt.Errorf("SSH клиент не инициализирован"))
+	}
+
 	srcFile, err := os.Open(src)
 	if err != nil {
-		return errors.NewSSHFileTransferError(string(c.sshClient.ServerVersion()), src, dst, err)
+		return c.wrapSSHError("", src, dst, err)
 	}
 	defer srcFile.Close()
 
-	dir := filepath.Dir(dst)
-	_ = c.sftp.MkdirAll(dir)
+	if err := c.sftp.MkdirAll(filepath.Dir(dst)); err != nil {
+		return c.wrapSSHError("", src, dst, fmt.Errorf("failed to create remote directory: %w", err))
+	}
 
 	dstFile, err := c.sftp.Create(dst)
 	if err != nil {
-		return errors.NewSSHFileTransferError(string(c.sshClient.ServerVersion()), src, dst, err)
+		return c.wrapSSHError("", src, dst, err)
 	}
 	defer dstFile.Close()
 
-	_, err = io.Copy(dstFile, srcFile)
-	if err != nil {
-		return errors.NewSSHFileTransferError(string(c.sshClient.ServerVersion()), src, dst, err)
+	if _, err := io.Copy(dstFile, srcFile); err != nil {
+		return c.wrapSSHError("", src, dst, err)
 	}
 
 	return nil
 }
 
 func (c *SSHClient) Download(src, dst string) error {
+	if c == nil || c.sftp == nil {
+		return errors.NewSSHConnectionError("nil", fmt.Errorf("SSH клиент не инициализирован"))
+	}
+
 	srcFile, err := c.sftp.Open(src)
 	if err != nil {
-		return errors.NewSSHFileTransferError(string(c.sshClient.ServerVersion()), src, dst, err)
+		return c.wrapSSHError(src, "", dst, err)
 	}
 	defer srcFile.Close()
 
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-		return err
+		return errors.NewSSHFileTransferError("", src, dst, err)
 	}
 
 	dstFile, err := os.Create(dst)
 	if err != nil {
-		return errors.NewSSHFileTransferError(string(c.sshClient.ServerVersion()), src, dst, err)
+		return c.wrapSSHError(src, "", dst, err)
 	}
 	defer dstFile.Close()
 
-	_, err = io.Copy(dstFile, srcFile)
-	if err != nil {
-		return errors.NewSSHFileTransferError(string(c.sshClient.ServerVersion()), src, dst, err)
+	if _, err := io.Copy(dstFile, srcFile); err != nil {
+		return c.wrapSSHError(src, "", dst, err)
 	}
 
 	return nil
 }
 
 func (c *SSHClient) UploadReader(r io.Reader, dst string) error {
-	dir := filepath.Dir(dst)
-	_ = c.sftp.MkdirAll(dir)
+	if c == nil || c.sftp == nil {
+		return errors.NewSSHConnectionError("nil", fmt.Errorf("SSH клиент не инициализирован"))
+	}
+
+	if err := c.sftp.MkdirAll(filepath.Dir(dst)); err != nil {
+		return c.wrapSSHError("", "(in-memory)", dst, fmt.Errorf("failed to create remote directory: %w", err))
+	}
 
 	dstFile, err := c.sftp.Create(dst)
 	if err != nil {
-		return errors.NewSSHFileTransferError(string(c.sshClient.ServerVersion()), "(in-memory)", dst, err)
+		return c.wrapSSHError("", "(in-memory)", dst, err)
 	}
 	defer dstFile.Close()
 
-	_, err = io.Copy(dstFile, r)
-	if err != nil {
-		return errors.NewSSHFileTransferError(string(c.sshClient.ServerVersion()), "(in-memory)", dst, err)
+	if _, err := io.Copy(dstFile, r); err != nil {
+		return c.wrapSSHError("", "(in-memory)", dst, err)
 	}
 
 	return nil
 }
 
+func (c *SSHClient) ReadDir(path string) ([]os.FileInfo, error) {
+	if c == nil || c.sftp == nil {
+		return nil, errors.NewSSHConnectionError("nil", fmt.Errorf("SSH клиент не инициализирован"))
+	}
+
+	files, err := c.sftp.ReadDir(path)
+	if err != nil {
+		return nil, c.wrapSSHError("", "", path, err)
+	}
+
+	return files, nil
+}
+
 func (c *SSHClient) Close() error {
 	var errs []error
+
+	if c == nil {
+		return errors.NewSSHConnectionError("nil", fmt.Errorf("SSH клиент не инициализирован"))
+	}
 
 	if c.sftp != nil {
 		if err := c.sftp.Close(); err != nil {
@@ -147,10 +172,9 @@ func (c *SSHClient) Close() error {
 	return nil
 }
 
-func (c *SSHClient) ReadDir(path string) ([]os.FileInfo, error) {
-	files, err := c.sftp.ReadDir(path)
-	if err != nil {
-		return nil, errors.NewSSHFileTransferError(string(c.sshClient.ServerVersion()), "", path, err)
+func (c *SSHClient) wrapSSHError(server, source, target string, err error) error {
+	if c != nil && c.sshClient != nil {
+		server = string(c.sshClient.ServerVersion())
 	}
-	return files, nil
+	return errors.NewSSHFileTransferError(server, source, target, err)
 }
