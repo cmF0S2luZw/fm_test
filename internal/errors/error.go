@@ -1,3 +1,4 @@
+// internal/errors/error.go
 package errors
 
 import "fmt"
@@ -123,5 +124,33 @@ func NewSSHFileTransferError(server, source, target string, err error) error {
 		Source: source,
 		Target: target,
 		Err:    err,
+	}
+}
+
+type VersionError struct {
+	Version    string
+	Constraint string
+	Err        error
+}
+
+func (e *VersionError) Error() string {
+	if e.Constraint != "" {
+		return fmt.Sprintf("ошибка проверки версии: %q не удовлетворяет условию %q", e.Version, e.Constraint)
+	}
+	if e.Err != nil {
+		return fmt.Sprintf("ошибка парсинга версии: %s", e.Err.Error())
+	}
+	return "ошибка версии"
+}
+
+func (e *VersionError) Unwrap() error {
+	return e.Err
+}
+
+func NewVersionError(version, constraint string, err error) error {
+	return &VersionError{
+		Version:    version,
+		Constraint: constraint,
+		Err:        err,
 	}
 }

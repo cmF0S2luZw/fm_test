@@ -146,3 +146,11 @@ func (c *SSHClient) Close() error {
 
 	return nil
 }
+
+func (c *SSHClient) ReadDir(path string) ([]os.FileInfo, error) {
+	files, err := c.sftp.ReadDir(path)
+	if err != nil {
+		return nil, errors.NewSSHFileTransferError(string(c.sshClient.ServerVersion()), "", path, err)
+	}
+	return files, nil
+}

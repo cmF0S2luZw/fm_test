@@ -4,15 +4,17 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"sync"
 
 	"pm/config"
 	"pm/internal/archive"
 	"pm/internal/cli"
-
 	"pm/internal/errors"
 	"pm/internal/logger"
 	"pm/internal/ssh"
+	"pm/internal/utils"
+	"pm/pkg/version"
 )
 
 const maxConcurrentOps = 5
@@ -167,28 +169,74 @@ func handleUpdate(configPath string, log logger.LoggerInterface) error {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			archiveName := pkg.Name
-			if pkg.Ver != "" {
-				archiveName += "-" + pkg.Ver
+			remoteDir := remotePath
+			if !strings.HasSuffix(remoteDir, "/") {
+				remoteDir += "/"
 			}
-			archiveName += ".zip"
 
-			remoteFile := remotePath + archiveName
-			localFile := "./" + archiveName
-
-			log.Info("Скачивание пакета: %s", archiveName)
-			if err := client.Download(remoteFile, localFile); err != nil {
-				errs <- fmt.Errorf("ошибка скачивания %s: %w", archiveName, err)
+			// ✅ ПРАВИЛЬНЫЙ ВЫЗОВ: используем интерфейсный метод ReadDir
+			files, err := client.ReadDir(remoteDir)
+			if err != nil {
+				log.Error("Ошибка чтения удалённой директории: %v", err)
+				errs <- errors.NewSSHConnectionError(host, err)
 				return
 			}
 
-			log.Info("Распаковка: %s", localFile)
-			if err := archive.ExtractZip(log, localFile, "./"); err != nil {
-				errs <- fmt.Errorf("ошибка распаковки %s: %w", archiveName, err)
-				return
+			found := false
+			for _, f := range files {
+				if f.IsDir() || !strings.HasSuffix(f.Name(), ".zip") {
+					continue
+				}
+
+				if !strings.HasPrefix(f.Name(), pkg.Name+"-") {
+					continue
+				}
+
+				versionStr := utils.ExtractVersion(f.Name())
+				if versionStr == "" {
+					log.Debug("Не удалось извлечь версию из файла", "файл", f.Name())
+					continue
+				}
+
+				if pkg.Ver != "" {
+					matches, err := version.Matches(versionStr, pkg.Ver)
+					if err != nil {
+						log.Warn("Ошибка проверки версии %s для %s: %v", versionStr, pkg.Name, err)
+						continue
+					}
+					if !matches {
+						log.Debug("Версия не соответствует условию", "файл", f.Name(), "требуется", pkg.Ver, "имеется", versionStr)
+						continue
+					}
+				}
+
+				remoteFile := remotePath + f.Name()
+				localFile := "./" + f.Name()
+
+				log.Info("Найден подходящий пакет: %s (версия %s)", f.Name(), versionStr)
+
+				if err := client.Download(remoteFile, localFile); err != nil {
+					log.Error("Ошибка скачивания пакета", "файл", f.Name(), "ошибка", err.Error())
+					errs <- errors.NewSSHFileTransferError(host, remoteFile, localFile, err)
+					return
+				}
+
+				if err := archive.ExtractZip(log, localFile, "./"); err != nil {
+					log.Error("Ошибка распаковки пакета", "файл", f.Name(), "ошибка", err.Error())
+					errs <- errors.NewArchiveExtractionError(localFile, "./", err)
+					return
+				}
+
+				log.Info("Пакет успешно установлен", "имя", pkg.Name, "версия", versionStr)
+				found = true
+				break
 			}
 
-			log.Info("Установлен пакет: %s", pkg.Name)
+			if !found {
+				errMsg := fmt.Sprintf("не найден подходящий пакет: %s (условие: %s)", pkg.Name, pkg.Ver)
+				log.Error(errMsg)
+				errs <- fmt.Errorf(errMsg)
+			}
 		}(pkg)
 	}
 
@@ -197,7 +245,7 @@ func handleUpdate(configPath string, log logger.LoggerInterface) error {
 
 	var finalErr error
 	for err := range errs {
-		log.Error("Ошибка обработки пакета: %v", err)
+		log.Error("Ошибка при установке пакета: %v", err)
 		finalErr = err
 	}
 
