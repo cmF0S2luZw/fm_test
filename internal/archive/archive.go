@@ -1,7 +1,9 @@
 package archive
 
 import (
+	"archive/tar"
 	"archive/zip"
+	"compress/gzip"
 	"io"
 	"os"
 	"path/filepath"
@@ -282,4 +284,198 @@ func ExtractZip(log logger.LoggerInterface, zipPath, destDir string) error {
 	)
 
 	return nil
+}
+
+func CreateTarGz(log logger.LoggerInterface, files []string, outputPath string) error {
+	log.Info("Начало создания tar.gz архива",
+		"выходной_файл", outputPath,
+		"количество_файлов", len(files),
+	)
+
+	if len(files) == 0 {
+		log.Error("Попытка создать архив без файлов")
+		return errors.NewArchiveCreationError(
+			outputPath,
+			files,
+			errors.ErrEmptyFileList,
+		)
+	}
+
+	outFile, err := os.Create(outputPath)
+	if err != nil {
+		log.Error("Ошибка создания файла архива",
+			"файл", outputPath,
+			"ошибка", err.Error(),
+		)
+		return errors.NewArchiveCreationError(outputPath, files, err)
+	}
+	defer outFile.Close()
+
+	gw := gzip.NewWriter(outFile)
+	defer gw.Close()
+
+	tw := tar.NewWriter(gw)
+	defer tw.Close()
+
+	for _, filePath := range files {
+		err := addToTar(tw, filePath)
+		if err != nil {
+			log.Error("Ошибка добавления файла в tar",
+				"файл", filePath,
+				"ошибка", err.Error(),
+			)
+			return errors.NewArchiveCreationError(outputPath, files, err)
+		}
+	}
+
+	log.Info("Tar.gz архив успешно создан",
+		"файл", outputPath,
+		"количество_файлов", len(files),
+	)
+
+	return nil
+}
+
+func ExtractTarGz(log logger.LoggerInterface, tarGzPath, destDir string) error {
+	log.Info("Начало распаковки tar.gz архива",
+		"архив", tarGzPath,
+		"цель", destDir,
+	)
+
+	file, err := os.Open(tarGzPath)
+	if err != nil {
+		log.Error("Ошибка открытия tar.gz архива",
+			"архив", tarGzPath,
+			"ошибка", err.Error(),
+		)
+		return errors.NewArchiveExtractionError(tarGzPath, destDir, err)
+	}
+	defer file.Close()
+
+	gzReader, err := gzip.NewReader(file)
+	if err != nil {
+		log.Error("Ошибка создания gzip ридера",
+			"архив", tarGzPath,
+			"ошибка", err.Error(),
+		)
+		return errors.NewArchiveExtractionError(tarGzPath, destDir, err)
+	}
+	defer gzReader.Close()
+
+	tarReader := tar.NewReader(gzReader)
+	fileCount := 0
+
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			log.Error("Ошибка чтения tar записи",
+				"архив", tarGzPath,
+				"ошибка", err.Error(),
+			)
+			return errors.NewArchiveExtractionError(tarGzPath, destDir, err)
+		}
+
+		fileCount++
+		target := filepath.Join(destDir, header.Name)
+		log.Debug("Обработка файла из архива",
+			"файл", header.Name,
+			"тип", header.Typeflag,
+		)
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if _, err := os.Stat(target); err != nil {
+				if err := os.MkdirAll(target, os.FileMode(header.Mode)); err != nil {
+					log.Error("Ошибка создания директории",
+						"директория", target,
+						"ошибка", err.Error(),
+					)
+					return errors.NewArchiveExtractionError(tarGzPath, destDir, err)
+				}
+			}
+
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(target), os.ModePerm); err != nil {
+				log.Error("Ошибка создания родительской директории",
+					"директория", filepath.Dir(target),
+					"ошибка", err.Error(),
+				)
+				return errors.NewArchiveExtractionError(tarGzPath, destDir, err)
+			}
+
+			outFile, err := os.OpenFile(target, os.O_CREATE|os.O_RDWR|os.O_TRUNC, os.FileMode(header.Mode))
+			if err != nil {
+				log.Error("Ошибка создания файла",
+					"файл", target,
+					"ошибка", err.Error(),
+				)
+				return errors.NewArchiveExtractionError(tarGzPath, destDir, err)
+			}
+
+			if _, err := io.Copy(outFile, tarReader); err != nil {
+				outFile.Close()
+				log.Error("Ошибка копирования содержимого",
+					"из", header.Name,
+					"в", target,
+					"ошибка", err.Error(),
+				)
+				return errors.NewArchiveExtractionError(tarGzPath, destDir, err)
+			}
+			outFile.Close()
+		}
+	}
+
+	log.Info("Распаковка tar.gz архива завершена успешно",
+		"архив", tarGzPath,
+		"цель", destDir,
+		"файлов_распаковано", fileCount,
+	)
+
+	return nil
+}
+
+func CreateTgz(log logger.LoggerInterface, files []string, outputPath string) error {
+	return CreateTarGz(log, files, outputPath)
+}
+
+func ExtractTgz(log logger.LoggerInterface, tgzPath, destDir string) error {
+	return ExtractTarGz(log, tgzPath, destDir)
+}
+
+func addToTar(tw *tar.Writer, filePath string) error {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+
+	header, err := tar.FileInfoHeader(info, "")
+	if err != nil {
+		return err
+	}
+
+	relPath, err := filepath.Rel(filepath.Dir(filePath), filePath)
+	if err != nil {
+		return err
+	}
+	header.Name = relPath
+
+	if err := tw.WriteHeader(header); err != nil {
+		return err
+	}
+
+	if info.IsDir() {
+		return nil
+	}
+
+	_, err = io.Copy(tw, file)
+	return err
 }

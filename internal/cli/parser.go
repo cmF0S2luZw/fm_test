@@ -1,4 +1,3 @@
-// internal/cli/parser.go
 package cli
 
 import (
@@ -6,7 +5,6 @@ import (
 	"strings"
 
 	"pm/internal/errors"
-	"pm/internal/logger"
 
 	"github.com/alecthomas/kingpin/v2"
 )
@@ -30,13 +28,8 @@ func Parse() (*ParsedCommand, error) {
 	app.HelpFlag.Short('h')
 
 	logLevel := app.Flag("log-level", "Уровень логирования").
-		Default(logger.LevelInfo).
-		Enum(
-			logger.LevelDebug,
-			logger.LevelInfo,
-			logger.LevelWarn,
-			logger.LevelError,
-		)
+		Default("info").
+		Enum("debug", "info", "warn", "error")
 
 	createCmd := app.Command(string(Create), "Упаковать файлы в архив")
 	createConfig := createCmd.Arg("config", "Путь к packet.json или packet.yaml").Required().ExistingFile()
@@ -49,20 +42,25 @@ func Parse() (*ParsedCommand, error) {
 		return nil, err
 	}
 
+	normalizedLevel := strings.ToLower(*logLevel)
+
 	switch cmd {
 	case string(Create):
 		return &ParsedCommand{
 			Type:       Create,
 			ConfigPath: *createConfig,
-			LogLevel:   strings.ToLower(*logLevel),
+			LogLevel:   normalizedLevel,
 		}, nil
 	case string(Update):
 		return &ParsedCommand{
 			Type:       Update,
 			ConfigPath: *updateConfig,
-			LogLevel:   strings.ToLower(*logLevel),
+			LogLevel:   normalizedLevel,
 		}, nil
 	default:
+		if cmd == "" {
+			return nil, errors.ErrUnknownCommand
+		}
 		return nil, &errors.UnknownCommandError{Command: cmd}
 	}
 }

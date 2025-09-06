@@ -7,6 +7,7 @@ var (
 	ErrNoFilesFound     = fmt.Errorf("ни одного файла не найдено по указанным путям")
 	ErrEmptyFileList    = fmt.Errorf("список файлов пуст")
 	ErrInvalidSSHConfig = fmt.Errorf("некорректная конфигурация SSH")
+	ErrUnknownCommand   = fmt.Errorf("отсутствует команда")
 )
 
 type UnknownCommandError struct {

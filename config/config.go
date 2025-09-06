@@ -2,7 +2,7 @@ package config
 
 import (
 	"encoding/json"
-	"io/ioutil"
+	"os"
 	"path/filepath"
 
 	"gopkg.in/yaml.v2"
@@ -16,6 +16,7 @@ type Target struct {
 type Packet struct {
 	Name    string   `json:"name" yaml:"name"`
 	Ver     string   `json:"ver" yaml:"ver"`
+	Format  string   `json:"format,omitempty" yaml:"format,omitempty"`
 	Targets []Target `json:"targets" yaml:"targets"`
 	Packets []Packet `json:"packets,omitempty" yaml:"packets,omitempty"`
 }
@@ -25,7 +26,7 @@ type Packages struct {
 }
 
 func LoadPacketConfig(path string) (*Packet, error) {
-	data, err := ioutil.ReadFile(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -45,7 +46,7 @@ func LoadPacketConfig(path string) (*Packet, error) {
 }
 
 func LoadPackagesConfig(path string) (*Packages, error) {
-	data, err := ioutil.ReadFile(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
